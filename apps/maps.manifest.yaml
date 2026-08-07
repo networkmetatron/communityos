@@ -1,0 +1,10 @@
+id: maps
+name: Maps
+description: Offline maps (Martin tiles + MapLibre)
+url: https://maps.community.home.arpa
+domain: maps.community.home.arpa
+compose: apps/maps.yaml
+container: communityos-martin
+data: /opt/communityos/data/maps
+requires:
+  - caddy

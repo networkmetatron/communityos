@@ -1,0 +1,1187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prefer installed location; fall back to package directory when running from media
+if [[ -d /opt/communityos ]]; then
+  export COMMUNITYOS_ROOT=/opt/communityos
+elif [[ -f "$(cd "$(dirname "$0")/.." && pwd)/compose.yaml" ]]; then
+  export COMMUNITYOS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+else
+  export COMMUNITYOS_ROOT=/opt/communityos
+fi
+
+# shellcheck source=/dev/null
+source "${COMMUNITYOS_ROOT}/lib/common.sh" 2>/dev/null || source "$(cd "$(dirname "$0")/.." && pwd)/lib/common.sh"
+
+usage() {
+  cat <<'USAGE'
+CommunityOS
+
+Usage:
+  communityos <command>
+
+Setup
+-----
+  install     Install CommunityOS
+  update      Update platform components
+  uninstall   Remove CommunityOS
+
+Operations
+----------
+  start       Start CommunityOS
+  stop        Stop CommunityOS
+  restart     Restart CommunityOS
+  status      Show platform dashboard
+
+Protection
+----------
+  backup      Backup CommunityOS data
+  restore     Restore from a backup
+
+Apps
+----
+  apps        List optional apps
+  app         Install/remove optional apps
+
+Maintenance
+-----------
+  doctor      Run health checks
+  health      Alias for doctor
+  logs        View platform logs
+
+Information
+-----------
+  info        How to connect (URLs, certificate, DNS)
+  version     Show version
+  help        Show this help
+USAGE
+}
+
+
+
+cmd_info() {
+  ensure_installed 2>/dev/null || true
+
+  local ver="1.1.0"
+  [[ -f "${COMMUNITYOS_ROOT}/VERSION" ]] && ver="$(tr -d '\n' < "${COMMUNITYOS_ROOT}/VERSION")"
+
+  local domain_base="community.home.arpa"
+  local domain_chat="chat.community.home.arpa"
+  local domain_ai="ai.community.home.arpa"
+  local server_ip="" community_name="" provide_dns="0"
+
+  if [[ -f "${COMMUNITYOS_ROOT}/.env" ]]; then
+    if declare -F load_env >/dev/null 2>&1; then
+      load_env
+    else
+      set -a
+      # shellcheck disable=SC1090
+      source "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+      set +a
+    fi
+    domain_base="${DOMAIN_BASE:-$domain_base}"
+    domain_chat="${DOMAIN_CHAT:-$domain_chat}"
+    domain_ai="${DOMAIN_AI:-$domain_ai}"
+    server_ip="${SERVER_IP:-}"
+    community_name="${COMMUNITY_NAME:-}"
+    provide_dns="${PROVIDE_DNS:-0}"
+    ADMIN_USER="${ADMIN_USER:-admin}"
+    ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+  fi
+  # strip quotes if present from quoted .env values
+  server_ip="${server_ip%\'}"
+  server_ip="${server_ip#\'}"
+  community_name="${community_name%\'}"
+  community_name="${community_name#\'}"
+  domain_base="${domain_base%\'}"
+  domain_base="${domain_base#\'}"
+  domain_chat="${domain_chat%\'}"
+  domain_chat="${domain_chat#\'}"
+  domain_ai="${domain_ai%\'}"
+  domain_ai="${domain_ai#\'}"
+  provide_dns="${provide_dns%\'}"
+  provide_dns="${provide_dns#\'}"
+
+  ADMIN_USER="${ADMIN_USER:-admin}"
+  if [[ -z "${ADMIN_EMAIL}" ]]; then
+    ADMIN_EMAIL="admin@${domain_base}"
+  fi
+  if [[ -z "${server_ip}" ]]; then
+    server_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+  fi
+
+  _up() {
+    docker inspect --format='{{.State.Status}}' "$1" 2>/dev/null | grep -qi running
+  }
+
+  echo
+  echo "CommunityOS ${ver}"
+  if [[ -n "${community_name}" ]]; then
+    echo "Community: ${community_name}"
+  fi
+  echo
+  echo "Welcome"
+  echo
+  echo "  http://${domain_base}"
+  echo
+  echo "  First time?"
+  echo "  Download the CommunityOS CA certificate here."
+  echo
+  echo "Certificate"
+  echo
+  echo "  Download CA:"
+  echo "    http://${domain_base}/ca.crt"
+  echo
+  echo "  One CommunityOS CA secures every service."
+  echo
+  echo "Administrator"
+  echo
+  echo "  Username:"
+  echo "    ${ADMIN_USER:-admin}"
+  echo
+  echo "  Email:"
+  echo "    ${ADMIN_EMAIL:-admin@${domain_base}}"
+  echo
+  echo "  Password:"
+  echo "    (the password chosen during installation)"
+  echo
+  echo "  This administrator identity is used across CommunityOS services where supported."
+  echo
+  echo "Access"
+  echo
+  echo "  Website:"
+  echo "    https://${domain_base}"
+  echo
+  echo "  Chat:"
+  echo "    https://${domain_chat}"
+  echo
+  echo "  Assistant:"
+  echo "    https://${domain_ai}"
+
+  # Optional apps (installed only)
+  # shellcheck source=/dev/null
+  source "${COMMUNITYOS_ROOT}/lib/apps.sh" 2>/dev/null || true
+  if declare -F app_list_ids >/dev/null 2>&1; then
+    local id name url any=0
+    while IFS= read -r id; do
+      [[ -z "${id}" ]] && continue
+      [[ -f "${COMMUNITYOS_ROOT}/runtime/apps/${id}.enabled" ]] || continue
+      name="$(app_meta "${id}" name 2>/dev/null || echo "${id}")"
+      url="$(app_meta "${id}" url 2>/dev/null || true)"
+      [[ -z "${url}" ]] && url="https://$(app_meta "${id}" domain 2>/dev/null || echo "")"
+      if [[ -n "${url}" && "${url}" != "https://" ]]; then
+        if [[ "${any}" -eq 0 ]]; then
+          echo
+          any=1
+        fi
+        echo "  ${name}:"
+        echo "    ${url}"
+        echo
+      fi
+    done < <(app_list_ids)
+  fi
+
+  echo "Server"
+  echo
+  echo "  LAN IP:"
+  echo "    ${server_ip:-unknown}"
+  echo
+  if [[ "${provide_dns}" == "1" ]]; then
+    echo "  DNS:"
+    echo "    Enabled"
+    echo
+    echo "  Configure your router to advertise:"
+    echo
+    echo "    ${server_ip:-unknown}"
+  else
+    echo "  DNS:"
+    echo "    Disabled"
+    echo
+    echo "  Access services by IP or your existing DNS."
+  fi
+  echo
+  echo "Status"
+  echo
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if [[ "${provide_dns}" == "1" ]]; then
+      if _up communityos-dns; then echo "  DNS:        running"; else echo "  DNS:        down"; fi
+    else
+      echo "  DNS:        disabled"
+    fi
+    if _up communityos-caddy; then echo "  HTTPS:      gateway up"; else echo "  HTTPS:      gateway down"; fi
+    if _up communityos-wordpress; then echo "  Website:    up"; else echo "  Website:    down"; fi
+    if _up communityos-synapse && _up communityos-element; then echo "  Chat:       up"; else echo "  Chat:       down"; fi
+    if _up communityos-open-webui; then echo "  Assistant:  up"; else echo "  Assistant:  down"; fi
+  else
+    echo "  (Docker not available in this shell — try: sudo communityos info)"
+  fi
+  echo
+  echo "Paths"
+  echo
+  echo "  Install:"
+  echo "    ${COMMUNITYOS_ROOT}"
+  echo
+  echo "  Backups:"
+  echo "    ${COMMUNITYOS_ROOT}/backups"
+  echo
+}
+
+cmd_version() {
+  if [[ -f "${COMMUNITYOS_ROOT}/VERSION" ]]; then
+    cat "${COMMUNITYOS_ROOT}/VERSION"
+  else
+    echo "1.0.2"
+  fi
+}
+
+cmd_status() {
+  ensure_installed
+
+  local ver="1.1.0"
+  [[ -f "${COMMUNITYOS_ROOT}/VERSION" ]] && ver="$(tr -d '\n' < "${COMMUNITYOS_ROOT}/VERSION")"
+
+  local server_ip="" provide_dns="0"
+  if [[ -f "${COMMUNITYOS_ROOT}/.env" ]]; then
+    load_env 2>/dev/null || true
+    server_ip="${SERVER_IP:-}"
+    provide_dns="${PROVIDE_DNS:-0}"
+  fi
+  if [[ -z "${server_ip}" ]]; then
+    server_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+  fi
+
+  _svc_up() {
+    # $1 = container name
+    docker inspect --format='{{.State.Status}}' "$1" 2>/dev/null | grep -qi running
+  }
+
+  _mark() {
+    if "$1"; then echo "✓"; else echo "○"; fi
+  }
+
+  echo
+  echo "CommunityOS ${ver}"
+  echo
+
+  echo "Core"
+  echo
+  if _svc_up communityos-wordpress; then echo "  ✓ Website"; else echo "  ○ Website"; fi
+  if _svc_up communityos-synapse && _svc_up communityos-element; then echo "  ✓ Chat"; else echo "  ○ Chat"; fi
+  if _svc_up communityos-open-webui; then echo "  ✓ Assistant"; else echo "  ○ Assistant"; fi
+  echo
+
+  echo "Infrastructure"
+  echo
+  if [[ "${provide_dns}" == "1" ]] || [[ "${provide_dns}" == "'1'" ]]; then
+    if _svc_up communityos-dns; then echo "  ✓ DNS"; else echo "  ○ DNS"; fi
+  else
+    echo "  · DNS (not enabled — managed outside CommunityOS)"
+  fi
+  if _svc_up communityos-caddy; then
+    echo "  ✓ Gateway"
+    echo "  ✓ Caddy"
+  else
+    echo "  ○ Gateway"
+    echo "  ○ Caddy"
+  fi
+  echo
+
+  echo "Optional Apps"
+  echo
+  # shellcheck source=/dev/null
+  source "${COMMUNITYOS_ROOT}/lib/apps.sh" 2>/dev/null || true
+  local id name ctn
+  if declare -F app_list_ids >/dev/null 2>&1; then
+    while IFS= read -r id; do
+      [[ -z "${id}" ]] && continue
+      name="$(app_meta "${id}" name 2>/dev/null || echo "${id}")"
+      ctn="$(app_meta "${id}" container 2>/dev/null || true)"
+      if [[ -f "${COMMUNITYOS_ROOT}/runtime/apps/${id}.enabled" ]]; then
+        if [[ -n "${ctn}" ]] && _svc_up "${ctn}"; then
+          echo "  ✓ ${name}"
+        else
+          echo "  ! ${name} (enabled, not running)"
+        fi
+      else
+        echo "  ○ ${name}"
+      fi
+    done < <(app_list_ids)
+  else
+    for pair in "kiwix:Library:communityos-kiwix" "maps:Maps:communityos-martin" "jellyfin:Media:communityos-jellyfin" "nextcloud:Files:communityos-nextcloud" "peertube:Streaming:communityos-peertube"; do
+      id="${pair%%:*}"
+      rest="${pair#*:}"
+      name="${rest%%:*}"
+      ctn="${rest##*:}"
+      if [[ -f "${COMMUNITYOS_ROOT}/runtime/apps/${id}.enabled" ]]; then
+        if _svc_up "${ctn}"; then echo "  ✓ ${name}"; else echo "  ! ${name} (enabled, not running)"; fi
+      else
+        echo "  ○ ${name}"
+      fi
+    done
+  fi
+  echo
+
+  echo "Certificates"
+  echo
+  if _svc_up communityos-caddy; then
+    if docker exec communityos-caddy test -f /data/caddy/pki/authorities/local/root.crt 2>/dev/null; then
+      echo "  ✓ CommunityOS CA"
+    else
+      echo "  ○ CommunityOS CA (not issued yet — open http://community.home.arpa once)"
+    fi
+    echo "  ✓ Service certificates issued by local CA (tls internal)"
+  else
+    echo "  ○ CommunityOS CA (gateway not running)"
+  fi
+  echo
+
+  echo "Network"
+  echo
+  echo "  LAN: ${server_ip:-unknown}"
+  if [[ "${provide_dns}" == "1" ]] || [[ "${provide_dns}" == "'1'" ]]; then
+    echo "  DNS: Enabled"
+  else
+    echo "  DNS: Disabled (external)"
+  fi
+  if ping -4 -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -4 -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    echo "  WAN: Connected"
+  else
+    echo "  WAN: Offline (local services should still work)"
+  fi
+  echo
+
+  echo "Storage"
+  echo
+  if [[ -d "${COMMUNITYOS_ROOT}" ]]; then
+    local avail_kb avail_h
+    avail_kb="$(df -Pk "${COMMUNITYOS_ROOT}" 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [[ -n "${avail_kb}" ]]; then
+      if command -v numfmt >/dev/null 2>&1; then
+        avail_h="$(numfmt --to=iec --suffix=B $((avail_kb * 1024)) 2>/dev/null || echo "$((avail_kb / 1024 / 1024)) GB")"
+      else
+        avail_h="$((avail_kb / 1024 / 1024)) GB"
+      fi
+      echo "  Free: ${avail_h}"
+    else
+      echo "  Free: unknown"
+    fi
+  fi
+  echo
+
+  # Optional: one-line tip
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo "Note: Docker not available in this shell (try: newgrp docker, or sudo communityos status)."
+    echo
+  fi
+}
+
+
+cmd_start() {
+  need_root start
+  ensure_installed
+  log_info "Starting CommunityOS..."
+  compose up -d
+  log_ok "CommunityOS started."
+}
+
+cmd_stop() {
+  need_root stop
+  ensure_installed
+  log_info "Stopping CommunityOS..."
+  compose stop
+  log_ok "CommunityOS stopped."
+}
+
+cmd_restart() {
+  need_root restart
+  ensure_installed
+  log_info "Restarting CommunityOS..."
+  compose restart
+  log_ok "CommunityOS restarted."
+}
+
+cmd_update() {
+  need_root update
+  ensure_installed
+  log_info "Updating CommunityOS..."
+  compose pull
+  compose up -d
+  log_ok "Update complete."
+  echo
+  echo "Open:  https://community.home.arpa"
+}
+
+cmd_backup() {
+  need_root backup
+  ensure_installed
+  local stamp dest
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "${COMMUNITYOS_ROOT}/backups"
+  dest="${COMMUNITYOS_ROOT}/backups/communityos-${stamp}.tar"
+  log_info "Creating backup..."
+  # Config + named volume snapshots via docker
+  tar -C "${COMMUNITYOS_ROOT}" -cf "${dest}" \
+    .env Caddyfile config.json compose.yaml static 2>/dev/null || true
+  # Append volume data using temporary containers
+  for vol in caddy_data wordpress_data synapse_data open_webui_data postgres_data mariadb_data; do
+    full="communityos_${vol}"
+    if docker volume inspect "${full}" >/dev/null 2>&1; then
+      docker run --rm -v "${full}:/data:ro" -v "${COMMUNITYOS_ROOT}/backups:/backups" alpine \
+        tar -C /data -rf "/backups/communityos-${stamp}.tar" . 2>/dev/null || true
+    fi
+  done
+  gzip -f "${dest}" 2>/dev/null || true
+  log_ok "Backup saved: ${dest}.gz"
+}
+
+cmd_restore() {
+  need_root restore
+  ensure_installed
+  local archive="${1:-}"
+  if [[ -z "${archive}" ]]; then
+    echo "Usage: communityos restore <backup-file.tar.gz>"
+    echo
+    echo "Available backups:"
+    ls -1 "${COMMUNITYOS_ROOT}/backups"/communityos-*.tar.gz 2>/dev/null || echo "  (none)"
+    exit 1
+  fi
+  if [[ ! -f "${archive}" ]]; then
+    echo "File not found: ${archive}"
+    exit 1
+  fi
+  log_warn "Restore replaces current configuration files from the archive."
+  read -rp "Continue? [y/N]: " ok
+  case "${ok}" in
+    [yY]*) ;;
+    *) echo "Cancelled."; exit 0 ;;
+  esac
+  compose stop || true
+  tar -C "${COMMUNITYOS_ROOT}" -xzf "${archive}" 2>/dev/null || tar -C "${COMMUNITYOS_ROOT}" -xf "${archive}"
+  compose up -d
+  log_ok "Restore finished."
+}
+
+
+cmd_logs() {
+  ensure_installed
+  local target="${1:-}"
+  local service=""
+
+  case "${target}" in
+    ""|all)
+      compose logs --tail=100 -f
+      return
+      ;;
+    website|wordpress|wp)
+      service="wordpress"
+      ;;
+    chat|matrix|synapse)
+      service="synapse"
+      ;;
+    ai|assistant|open-webui|webui)
+      service="open-webui"
+      ;;
+    gateway|caddy|https)
+      service="caddy"
+      ;;
+    dns)
+      service="dns"
+      ;;
+    element)
+      service="element-web"
+      ;;
+    *)
+      echo "Usage: communityos logs [website|chat|ai|gateway|dns|all]"
+      exit 1
+      ;;
+  esac
+
+  compose logs --tail=100 -f "${service}"
+}
+
+cmd_doctor() {
+  echo
+  echo "CommunityOS Health Check"
+  echo "========================"
+  echo
+
+  pass() { echo "  ✓ $*"; }
+  fail() { echo "  ✗ $*"; DOCTOR_FAIL=1; }
+  DOCTOR_FAIL=0
+
+  # OS
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    if [[ "${ID:-}" == "debian" ]]; then
+      pass "Debian ${VERSION_ID}"
+    else
+      fail "Debian (found ${ID:-unknown})"
+    fi
+  else
+    fail "OS detection"
+  fi
+
+  # Docker
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    pass "Docker"
+  else
+    fail "Docker"
+  fi
+
+  if [[ ! -f "${COMMUNITYOS_ROOT}/.env" ]]; then
+    fail "Installation (${COMMUNITYOS_ROOT})"
+    echo
+    echo "Run:  sudo communityos install"
+    exit 1
+  fi
+  pass "Installation path"
+
+  # DNS server (optional — user may have chosen not to run CommunityOS DNS)
+  echo
+  echo "DNS Server"
+  server_ip=""
+  if [[ -f "${COMMUNITYOS_ROOT}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+    set +a
+    server_ip="${SERVER_IP:-}"
+  fi
+  if docker exec communityos-dns true >/dev/null 2>&1; then
+    pass "dnsmasq running"
+    if ss -lun 2>/dev/null | grep -q ':53 ' || ss -lunt 2>/dev/null | grep -q ':53' \
+       || docker port communityos-dns 2>/dev/null | grep -q 53; then
+      pass "Port 53 reachable"
+    else
+      fail "Port 53 reachable"
+    fi
+    resolve_name() {
+      local name="$1"
+      local ans=""
+      if command -v dig >/dev/null 2>&1 && [[ -n "${server_ip}" ]]; then
+        ans="$(dig +time=2 +tries=1 +short @"${server_ip}" "${name}" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+      fi
+      if [[ -z "${ans}" ]]; then
+        ans="$(getent ahostsv4 "${name}" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+      fi
+      if [[ -z "${ans}" ]]; then
+        ans="$(getent hosts "${name}" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.' | head -1 || true)"
+      fi
+      printf '%s' "${ans}"
+    }
+    for name in community.home.arpa chat.community.home.arpa ai.community.home.arpa; do
+      ans="$(resolve_name "${name}" || true)"
+      if [[ -n "${ans}" ]]; then
+        pass "${name} resolves (${ans})"
+      else
+        fail "${name} resolves locally"
+      fi
+    done
+  else
+    echo "  · CommunityOS DNS not running (disabled or external DNS)"
+    # Still check if names resolve somehow (hosts file / other DNS)
+    for name in community.home.arpa chat.community.home.arpa ai.community.home.arpa; do
+      ans="$(getent hosts "${name}" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+      if [[ -n "${ans}" ]]; then
+        pass "${name} resolves (${ans})"
+      else
+        echo "  · ${name} not in local resolver (configure hosts or your DNS)"
+      fi
+    done
+  fi
+
+  # Gateway
+  if docker exec communityos-caddy true >/dev/null 2>&1; then
+    pass "HTTPS gateway"
+  else
+    fail "HTTPS gateway"
+  fi
+
+  # Website — prefer container-local check, then host curl
+  if docker exec communityos-wordpress bash -c 'exec 3<>/dev/tcp/127.0.0.1/80' >/dev/null 2>&1 \
+     || docker exec communityos-caddy wget -q -O /dev/null http://wordpress:80/ >/dev/null 2>&1 \
+     || curl -fsS --connect-timeout 3 -H "Host: community.home.arpa" http://127.0.0.1/ >/dev/null 2>&1; then
+    pass "Website"
+  else
+    fail "Website"
+  fi
+
+  # Chat — synapse health endpoint (image includes curl)
+  syn_st="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' communityos-synapse 2>/dev/null || true)"
+  if docker exec communityos-synapse curl -fsS --connect-timeout 3 http://127.0.0.1:8008/health >/dev/null 2>&1 \
+     || echo "${syn_st}" | grep -qiE 'healthy'; then
+    pass "Chat"
+  elif echo "${syn_st}" | grep -qiE 'starting'; then
+    echo "  · Chat (still starting — wait and re-run doctor)"
+  else
+    fail "Chat"
+  fi
+
+  # Assistant
+  if docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' communityos-open-webui 2>/dev/null | grep -qiE 'healthy|running'; then
+    pass "Assistant"
+  else
+    fail "Assistant"
+  fi
+
+  # Disk
+  if [[ -d "${COMMUNITYOS_ROOT}" ]]; then
+    avail_kb="$(df -Pk "${COMMUNITYOS_ROOT}" | awk 'NR==2 {print $4}')"
+    avail_gb=$((avail_kb / 1024 / 1024))
+    if [[ "${avail_kb}" -lt $((2 * 1024 * 1024)) ]]; then
+      fail "Disk space (~${avail_gb} GB free)"
+    else
+      pass "Disk space (~${avail_gb} GB free)"
+    fi
+  fi
+
+  # Backups present?
+  if ls "${COMMUNITYOS_ROOT}/backups"/communityos-*.tar.gz >/dev/null 2>&1; then
+    pass "Backups"
+  else
+    echo "  · Backups (none yet — run: communityos backup)"
+  fi
+
+  # Stale /etc/hosts overrides (common while iterating / testing)
+  if [[ -f /etc/hosts ]]; then
+    _hosts_hits="$(grep -E '[[:space:]](community\.home\.arpa|chat\.community\.home\.arpa|ai\.community\.home\.arpa|library\.community\.home\.arpa|maps\.community\.home\.arpa|media\.community\.home\.arpa|files\.community\.home\.arpa|stream\.community\.home\.arpa)([[:space:]]|$)' /etc/hosts 2>/dev/null || true)"
+    if [[ -n "${_hosts_hits}" ]]; then
+      fail "No stale /etc/hosts overrides"
+      echo "      Found CommunityOS names in /etc/hosts (override DNS):"
+      echo "${_hosts_hits}" | sed 's/^/        /'
+      echo "      Remove with: sudo nano /etc/hosts"
+    else
+      pass "No stale /etc/hosts overrides"
+    fi
+  fi
+
+  echo
+  if [[ "${DOCTOR_FAIL}" -eq 0 ]]; then
+    echo "CommunityOS looks healthy."
+    # Remind about client DHCP when server provides DNS
+    if [[ -f "${COMMUNITYOS_ROOT}/.env" ]] && grep -qE '^PROVIDE_DNS=.?1' "${COMMUNITYOS_ROOT}/.env" 2>/dev/null; then
+      echo
+      echo "Server DNS is working."
+      echo
+      echo "If another device cannot resolve community.home.arpa:"
+      echo "  • Disconnect and reconnect Wi-Fi"
+      echo "  • OR unplug/reconnect Ethernet"
+      echo "  • OR renew the DHCP lease"
+      echo
+      echo "  The client may still be using its previous DNS server."
+    fi
+  else
+    echo "Some checks failed. Try:  sudo communityos restart"
+  fi
+  echo
+}
+
+
+
+cmd_uninstall() {
+  need_root uninstall
+
+  local purge=0
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --purge|-p) purge=1 ;;
+      -h|--help)
+        echo "Usage: communityos uninstall [--purge]"
+        echo "  Default keeps database volumes."
+        echo "  --purge also deletes volumes, configs, and local data."
+        exit 0
+        ;;
+    esac
+  done
+
+  local removed_containers=0 removed_networks=0 removed_volumes=0
+  local removed_config=0 removed_cli=0 removed_docker=0 removed_images=0
+  local preserved_data=1 preserved_backups=1
+
+  echo
+  echo "CommunityOS Uninstaller"
+  echo "======================="
+  echo
+  echo "This will remove CommunityOS from this computer."
+  echo
+  echo "It will remove:"
+  echo "  ✓ Docker containers (CommunityOS only)"
+  echo "  ✓ Networks (CommunityOS only)"
+  if [[ "${purge}" -eq 1 ]]; then
+    echo "  ✓ Data volumes (WordPress, Matrix, Assistant, databases)"
+    echo "  ✓ Configuration under ${COMMUNITYOS_ROOT}"
+  else
+    echo "  · Data volumes (kept unless you choose delete)"
+    echo "  · Configuration (kept unless you choose delete)"
+  fi
+  echo "  ✓ DNS service for community.home.arpa"
+  echo
+  echo "It will NOT remove by default:"
+  echo "  • Docker Engine"
+  echo "  • Networks or volumes not created by CommunityOS"
+  echo "  • Manual backups you copied elsewhere"
+  echo
+  read -rp "Continue? [y/N]: " cont
+  case "${cont}" in
+    y|Y|yes|YES|Yes) ;;
+    *) echo "Cancelled."; exit 0 ;;
+  esac
+
+  if [[ "${purge}" -eq 0 ]]; then
+    echo
+    echo "Remove databases?"
+    echo
+    echo "This can permanently erase:"
+    echo "  • WordPress"
+    echo "  • Matrix (Chat)"
+    echo "  • Open WebUI (Assistant)"
+    echo "  • All uploaded content"
+    echo
+    echo "  [1] Keep data (default)"
+    echo "  [2] Delete everything"
+    echo
+    read -rp "Selection [1/2]: " sel
+    case "${sel}" in
+      2) purge=1 ;;
+      *) purge=0 ;;
+    esac
+  fi
+
+  if [[ "${purge}" -eq 1 ]]; then
+    echo
+    echo "This will permanently delete all CommunityOS data."
+    echo
+    echo "Consider creating a backup first:"
+    echo "  communityos backup"
+    echo
+    read -rp "Type DELETE to continue: " confirm
+    if [[ "${confirm}" != "DELETE" ]]; then
+      echo "Cancelled (confirmation did not match)."
+      exit 0
+    fi
+  fi
+
+  echo
+  read -rp "Remove Docker Engine too? [y/N]: " rm_docker
+  case "${rm_docker}" in
+    [yY]*) rm_docker=1 ;;
+    *)     rm_docker=0 ;;
+  esac
+
+  echo
+  log_info "Stopping CommunityOS..."
+  if [[ -f "${COMMUNITYOS_ROOT}/compose.yaml" ]]; then
+    if [[ -f "${COMMUNITYOS_ROOT}/.env" ]]; then
+      docker compose -f "${COMMUNITYOS_ROOT}/compose.yaml" --env-file "${COMMUNITYOS_ROOT}/.env" down --remove-orphans 2>/dev/null || true
+    else
+      docker compose -f "${COMMUNITYOS_ROOT}/compose.yaml" down --remove-orphans 2>/dev/null || true
+    fi
+    removed_containers=1
+    removed_networks=1
+  fi
+
+  for c in communityos-caddy communityos-dns communityos-mariadb communityos-postgres \
+           communityos-wordpress communityos-wpcli communityos-synapse communityos-element \
+           communityos-open-webui communityos-open-webui-init; do
+    if docker rm -f "${c}" 2>/dev/null; then
+      removed_containers=1
+    fi
+  done
+
+  # Only CommunityOS compose project network
+  docker network rm communityos_default 2>/dev/null && removed_networks=1 || true
+
+  if [[ "${purge}" -eq 1 ]]; then
+    log_info "Removing data volumes..."
+    for v in communityos_caddy_data communityos_caddy_config communityos_mariadb_data \
+             communityos_wordpress_data communityos_postgres_data communityos_synapse_data \
+             communityos_open_webui_data; do
+      if docker volume rm "${v}" 2>/dev/null; then
+        removed_volumes=1
+      fi
+    done
+    preserved_data=0
+
+    log_info "Removing configuration..."
+    rm -f "${COMMUNITYOS_ROOT}/.env" \
+          "${COMMUNITYOS_ROOT}/config.json" \
+          "${COMMUNITYOS_ROOT}/runtime/dnsmasq.conf" 2>/dev/null || true
+    rm -rf "${COMMUNITYOS_ROOT}/runtime" 2>/dev/null || true
+    removed_config=1
+
+    # Local CA leftovers (only if installer ever dropped them on the host)
+    rm -f /usr/local/share/ca-certificates/communityos*.crt \
+          /usr/local/share/ca-certificates/caddy-local*.crt 2>/dev/null || true
+    if command -v update-ca-certificates >/dev/null 2>&1; then
+      update-ca-certificates >/dev/null 2>&1 || true
+    fi
+
+    read -rp "Also remove pulled CommunityOS container images? [y/N]: " rm_imgs
+    case "${rm_imgs}" in
+      [yY]*)
+        log_info "Removing images..."
+        docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
+          grep -E '^(caddy|mariadb|postgres|wordpress|matrixdotorg/synapse|vectorim/element-web|ghcr.io/open-webui/open-webui|andyshinn/dnsmasq|curlimages/curl):' | \
+          while read -r img; do docker rmi -f "${img}" 2>/dev/null || true; done
+        removed_images=1
+        ;;
+    esac
+
+    rm -f /usr/local/bin/communityos 2>/dev/null || true
+    removed_cli=1
+  else
+    log_ok "Data volumes preserved."
+  fi
+
+  if [[ "${rm_docker}" -eq 1 ]]; then
+    log_info "Removing Docker Engine..."
+    systemctl stop docker 2>/dev/null || true
+    apt-get remove -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin 2>/dev/null || true
+    apt-get autoremove -y -qq 2>/dev/null || true
+    removed_docker=1
+  fi
+
+  if [[ -d "${COMMUNITYOS_ROOT}/backups" ]] && ls "${COMMUNITYOS_ROOT}/backups"/* >/dev/null 2>&1; then
+    preserved_backups=1
+  else
+    preserved_backups=0
+  fi
+
+  echo
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+  echo "Removed:"
+  [[ "${removed_containers}" -eq 1 ]] && echo "  ✓ Containers" || echo "  · Containers (none found)"
+  [[ "${removed_networks}" -eq 1 ]] && echo "  ✓ Networks (CommunityOS only)" || echo "  · Networks"
+  if [[ "${purge}" -eq 1 ]]; then
+    [[ "${removed_volumes}" -eq 1 ]] && echo "  ✓ Data volumes" || true
+    echo "  ✓ Databases"
+    echo "  ✓ User uploads"
+    [[ "${removed_config}" -eq 1 ]] && echo "  ✓ Configuration" || true
+    [[ "${removed_images}" -eq 1 ]] && echo "  ✓ Container images" || true
+    [[ "${removed_cli}" -eq 1 ]] && echo "  ✓ communityos command" || true
+  fi
+  [[ "${removed_docker}" -eq 1 ]] && echo "  ✓ Docker Engine" || true
+
+  echo
+  echo "Preserved:"
+  if [[ "${preserved_data}" -eq 1 ]]; then
+    echo "  ✓ Databases"
+    echo "  ✓ User uploads / service data"
+  fi
+  if [[ -d "${COMMUNITYOS_ROOT}/backups" ]] && ls "${COMMUNITYOS_ROOT}/backups"/* >/dev/null 2>&1; then
+    echo "  ✓ Backups:"
+    echo
+    echo "      ${COMMUNITYOS_ROOT}/backups"
+    echo
+    echo "    You may safely archive or delete them later."
+  else
+    echo "  · Manual backups (none found)"
+  fi
+  if [[ "${removed_docker}" -eq 0 ]]; then
+    echo "  ✓ Docker Engine"
+  fi
+  if [[ "${purge}" -eq 0 && "${removed_cli}" -eq 0 ]]; then
+    echo "  ✓ communityos command"
+  fi
+
+  echo
+  echo "Router DNS must be restored manually"
+  echo "(set to Automatic or your ISP)."
+  echo
+  echo "Thank you for trying CommunityOS."
+  echo
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo
+}
+
+
+
+# Load KEY=VALUE from .env without executing unquoted spaces
+
+repair_env_quotes() {
+  local f="${COMMUNITYOS_ROOT}/.env"
+  [[ -f "${f}" ]] || return 0
+  # If COMMUNITY_NAME is unquoted and contains space, re-quote all simple assignments
+  if grep -qE '^COMMUNITY_NAME=[^'\''"].* ' "${f}" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+        local k="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+        if [[ "${v}" != \"*\" && "${v}" != \'*\' ]]; then
+          v="${v//\'/\'\\\'\'}"
+          printf "%s='%s'\n" "${k}" "${v}"
+        else
+          printf '%s\n' "${line}"
+        fi
+      else
+        printf '%s\n' "${line}"
+      fi
+    done < "${f}" > "${tmp}"
+    mv "${tmp}" "${f}"
+    chgrp docker "${f}" 2>/dev/null || true
+    chmod 640 "${f}" 2>/dev/null || true
+  fi
+}
+
+load_env() {
+  local f="${COMMUNITYOS_ROOT}/.env"
+  [[ -f "${f}" ]] || return 0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+    if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      local k="${BASH_REMATCH[1]}"
+      local v="${BASH_REMATCH[2]}"
+      # Strip surrounding quotes if present
+      if [[ "${v}" =~ ^\"(.*)\"$ ]]; then v="${BASH_REMATCH[1]}"; fi
+      if [[ "${v}" =~ ^\'(.*)\'$ ]]; then v="${BASH_REMATCH[1]}"; fi
+      printf -v "${k}" '%s' "${v}"
+      export "${k}"
+    fi
+  done < "${f}"
+}
+
+cmd_apps() {
+  ensure_installed
+  # shellcheck source=/dev/null
+  source "${COMMUNITYOS_ROOT}/lib/apps.sh" 2>/dev/null || true
+  echo
+  echo "CommunityOS Apps"
+  echo "================"
+  echo
+  echo "Installed (core)"
+  echo "  ✓ Website      https://community.home.arpa"
+  echo "  ✓ Chat         https://chat.community.home.arpa"
+  echo "  ✓ Assistant    https://ai.community.home.arpa"
+  echo
+  echo "Optional"
+  local id name desc url ctn status
+  for id in $(app_list_ids 2>/dev/null || printf '%s\n' kiwix maps jellyfin); do
+    name="$(app_meta "${id}" name)"
+    desc="$(app_meta "${id}" description)"
+    url="$(app_meta "${id}" url)"
+    ctn="$(app_meta "${id}" container)"
+    if app_is_enabled "${id}"; then
+      status="installed"
+      if [[ -n "${ctn}" ]] && docker inspect --format='{{.State.Status}}' "${ctn}" 2>/dev/null | grep -qi running; then
+        status="running"
+      elif [[ -n "${ctn}" ]] && docker inspect "${ctn}" >/dev/null 2>&1; then
+        status="stopped"
+      fi
+      echo "  ✓ ${name}  (${status})"
+      echo "      ${url}"
+    else
+      echo "  ○ ${name}"
+      echo "      ${desc}"
+      echo "      Install:  sudo communityos app install ${id}"
+    fi
+    echo
+  done
+}
+
+cmd_app() {
+  ensure_installed
+  # shellcheck source=/dev/null
+  source "${COMMUNITYOS_ROOT}/lib/apps.sh"
+  local sub="${1:-}"
+  shift || true
+  case "${sub}" in
+    install)
+      need_root "app install"
+      local id raw="${1:-}"
+      id="$(app_aliases_resolve "${raw}")"
+      if [[ -z "${id}" ]] || [[ -z "$(app_meta "${id}" name)" ]]; then
+        echo "Usage: communityos app install <kiwix|maps|jellyfin|nextcloud|peertube>"
+        exit 1
+      fi
+      repair_env_quotes
+      log_info "Installing app: $(app_meta "${id}" name)..."
+      mkdir -p "$(app_meta "${id}" data)" "${COMMUNITYOS_ROOT}/data/jellyfin/media"
+
+      # Ensure Nextcloud DB password + schema on MariaDB
+      if [[ "${id}" == "nextcloud" ]]; then
+        if ! grep -q '^NEXTCLOUD_DB_PASSWORD=' "${COMMUNITYOS_ROOT}/.env" 2>/dev/null; then
+          echo "NEXTCLOUD_DB_PASSWORD=$(openssl rand -hex 16)" >> "${COMMUNITYOS_ROOT}/.env"
+          chgrp docker "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+          chmod 640 "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+        fi
+        load_env
+        mkdir -p "${COMMUNITYOS_ROOT}/data/nextcloud"
+        chown -R 33:33 "${COMMUNITYOS_ROOT}/data/nextcloud" 2>/dev/null || true
+        docker exec communityos-mariadb mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "
+          CREATE DATABASE IF NOT EXISTS nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+          CREATE USER IF NOT EXISTS 'nextcloud'@'%' IDENTIFIED BY '${NEXTCLOUD_DB_PASSWORD}';
+          ALTER USER 'nextcloud'@'%' IDENTIFIED BY '${NEXTCLOUD_DB_PASSWORD}';
+          GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextcloud'@'%';
+          FLUSH PRIVILEGES;
+        " 2>/dev/null || log_warn "Could not prepare Nextcloud database (will retry after start)."
+      fi
+
+
+            if [[ "${id}" == "peertube" ]]; then
+        echo
+        echo "Note: Streaming (PeerTube) benefits from extra CPU, RAM, and disk"
+        echo "      because video transcoding can be resource-intensive."
+        echo
+        mkdir -p "${COMMUNITYOS_ROOT}/data/peertube/data" \
+                 "${COMMUNITYOS_ROOT}/data/peertube/config" \
+                 "${COMMUNITYOS_ROOT}/data/peertube/redis"
+        if ! grep -q '^PEERTUBE_DB_PASSWORD=' "${COMMUNITYOS_ROOT}/.env" 2>/dev/null; then
+          echo "PEERTUBE_DB_PASSWORD=$(openssl rand -hex 16)" >> "${COMMUNITYOS_ROOT}/.env"
+        fi
+        if ! grep -q '^PEERTUBE_SECRET=' "${COMMUNITYOS_ROOT}/.env" 2>/dev/null; then
+          echo "PEERTUBE_SECRET=$(openssl rand -hex 32)" >> "${COMMUNITYOS_ROOT}/.env"
+        fi
+        chgrp docker "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+        chmod 640 "${COMMUNITYOS_ROOT}/.env" 2>/dev/null || true
+        load_env
+        # Simple, reliable Postgres bootstrap (shared instance)
+        if [[ -n "${POSTGRES_PASSWORD:-}" && -n "${PEERTUBE_DB_PASSWORD:-}" ]]; then
+          docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" communityos-postgres \
+            psql -U "${POSTGRES_USER}" -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='peertube'" \
+            | grep -q 1 \
+            || docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" communityos-postgres \
+                 psql -U "${POSTGRES_USER}" -d postgres \
+                 -c "CREATE ROLE peertube LOGIN PASSWORD '${PEERTUBE_DB_PASSWORD}'" \
+            || log_warn "Could not create PeerTube DB role."
+          docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" communityos-postgres \
+            psql -U "${POSTGRES_USER}" -d postgres \
+            -c "ALTER ROLE peertube WITH PASSWORD '${PEERTUBE_DB_PASSWORD}'" 2>/dev/null || true
+          docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" communityos-postgres \
+            psql -U "${POSTGRES_USER}" -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='peertube'" \
+            | grep -q 1 \
+            || docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" communityos-postgres \
+                 psql -U "${POSTGRES_USER}" -d postgres \
+                 -c "CREATE DATABASE peertube OWNER peertube" \
+            || log_warn "Could not create PeerTube database."
+        else
+          log_warn "Missing Postgres/PeerTube passwords in .env — database not prepared."
+        fi
+      fi
+
+      app_enable "${id}"
+      app_update_dns
+      compose up -d
+      compose up -d --force-recreate caddy 2>/dev/null || compose up -d caddy
+      echo "  Certificates and DNS updated for optional apps (same CommunityOS CA)."
+      if [[ "${id}" == "nextcloud" ]]; then
+        sleep 3
+        chown -R 33:33 "${COMMUNITYOS_ROOT}/data/nextcloud" 2>/dev/null || true
+        docker restart communityos-nextcloud >/dev/null 2>&1 || true
+      fi
+      if [[ "${id}" == "jellyfin" ]]; then
+        sleep 5
+        docker start communityos-jellyfin-init >/dev/null 2>&1 || true
+      fi
+      log_ok "$(app_meta "${id}" name) installed."
+      echo
+      echo "  $(app_meta "${id}" url)"
+      echo "  Data: $(app_meta "${id}" data)"
+      echo
+      ;;
+    remove|uninstall)
+      need_root "app remove"
+      local id raw="${1:-}"
+      id="$(app_aliases_resolve "${raw}")"
+      if [[ -z "${id}" ]] || [[ -z "$(app_meta "${id}" name)" ]]; then
+        echo "Usage: communityos app remove <kiwix|maps|jellyfin|nextcloud|peertube>"
+        exit 1
+      fi
+      log_info "Removing app: $(app_meta "${id}" name)..."
+      local ctn
+      ctn="$(app_meta "${id}" container)"
+      [[ -n "${ctn}" ]] && docker rm -f "${ctn}" 2>/dev/null || true
+      if [[ "${id}" == "peertube" ]]; then
+        docker rm -f communityos-peertube-redis 2>/dev/null || true
+      fi
+      app_disable_flag "${id}"
+      compose up -d --remove-orphans
+      log_ok "$(app_meta "${id}" name) removed (data under $(app_meta "${id}" data) kept)."
+      ;;
+    restart)
+      need_root "app restart"
+      local id raw="${1:-}"
+      id="$(app_aliases_resolve "${raw}")"
+      case "${id}" in
+        kiwix) docker restart communityos-kiwix 2>/dev/null || compose up -d kiwix ;;
+        maps) docker restart communityos-martin 2>/dev/null || compose up -d martin ;;
+        jellyfin) docker restart communityos-jellyfin 2>/dev/null || compose up -d jellyfin ;;
+        nextcloud) docker restart communityos-nextcloud 2>/dev/null || compose up -d nextcloud ;;
+        peertube) docker restart communityos-peertube communityos-peertube-redis 2>/dev/null || compose up -d peertube peertube-redis ;;
+        *) echo "Usage: communityos app restart <kiwix|maps|jellyfin|nextcloud|peertube>"; exit 1 ;;
+      esac
+      log_ok "App restarted."
+      ;;
+    list|"")
+      cmd_apps
+      ;;
+    *)
+      echo "Usage:"
+      echo "  communityos apps"
+      echo "  communityos app install <kiwix|maps|jellyfin|nextcloud|peertube>"
+      echo "  communityos app remove  <kiwix|maps|jellyfin|nextcloud|peertube>"
+      echo "  communityos app restart <kiwix|maps|jellyfin|nextcloud|peertube>"
+      exit 1
+      ;;
+  esac
+}
+
+
+cmd_install() {
+  need_root install
+  # Prefer: (1) COMMUNITYOS_PKG  (2) package next to this script if it has compose.yaml
+  #          (3) /opt/communityos  (4) error
+  local pkg engine
+  if [[ -n "${COMMUNITYOS_PKG:-}" && -x "${COMMUNITYOS_PKG}/scripts/install-engine.sh" ]]; then
+    pkg="${COMMUNITYOS_PKG}"
+  else
+    local here
+    here="$(cd "$(dirname "$0")/.." && pwd)"
+    if [[ -f "${here}/compose.yaml" && -x "${here}/scripts/install-engine.sh" ]]; then
+      pkg="${here}"
+    elif [[ -x "${COMMUNITYOS_ROOT}/scripts/install-engine.sh" ]]; then
+      pkg="${COMMUNITYOS_ROOT}"
+    else
+      echo "Installer engine not found."
+      echo "Run from the extracted package:  cd communityos && sudo ./install.sh"
+      exit 1
+    fi
+  fi
+  engine="${pkg}/scripts/install-engine.sh"
+  COMMUNITYOS_ROOT="${COMMUNITYOS_ROOT:-/opt/communityos}" bash "${engine}"
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "${cmd}" in
+    install)  cmd_install "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    apps)     cmd_apps "$@" ;;
+    app)      cmd_app "$@" ;;
+    update)   cmd_update "$@" ;;
+    start)    cmd_start "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    restart)  cmd_restart "$@" ;;
+    status)   cmd_status "$@" ;;
+    backup)   cmd_backup "$@" ;;
+    restore)  cmd_restore "$@" ;;
+    doctor)   cmd_doctor "$@" ;;
+    health)   cmd_doctor "$@" ;;
+    logs)     cmd_logs "$@" ;;
+    info)     cmd_info "$@" ;;
+    version)  cmd_version "$@" ;;
+    help|-h|--help) usage ;;
+    *)
+      echo "Unknown command: ${cmd}"
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,10 @@
+.env
+runtime/
+data/
+backups/
+*.tar
+*.tar.gz
+*.pem
+*.key
+*.crt
+.DS_Store

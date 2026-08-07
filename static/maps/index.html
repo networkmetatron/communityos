@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CommunityOS Maps</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; font-family: system-ui, sans-serif;
+      background: #0f1419; color: #e7ecf3;
+      display: grid; place-items: center; padding: 1.5rem;
+    }
+    .card {
+      max-width: 32rem; width: 100%;
+      background: #1a2332; border: 1px solid #2a3548;
+      border-radius: 1rem; padding: 1.6rem 1.7rem; line-height: 1.5;
+    }
+    h1 { margin: 0 0 0.4rem; font-size: 1.4rem; }
+    p { margin: 0.55rem 0; color: #9aa8bc; }
+    code {
+      display: block; margin: 0.75rem 0; padding: 0.75rem 0.9rem;
+      background: #0f1419; border-radius: 0.5rem; color: #93c5fd;
+      font-size: 0.88rem; overflow-x: auto;
+    }
+    .ok { color: #86efac; }
+    a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>CommunityOS Maps</h1>
+    <p>Offline maps via Martin + MapLibre.</p>
+    <p id="status">Checking for map tiles…</p>
+    <p>Add <strong>.mbtiles</strong> or <strong>.pmtiles</strong> files on the server:</p>
+    <code>/opt/communityos/data/maps/</code>
+    <p>Then restart Maps:</p>
+    <code>sudo communityos app restart maps</code>
+    <p style="margin-top:1rem"><a href="https://community.home.arpa">Back to CommunityOS</a></p>
+  </div>
+  <script>
+    fetch("/tiles/catalog")
+      .then(r => r.ok ? r.json() : null)
+      .then(cat => {
+        const el = document.getElementById("status");
+        if (cat && Object.keys(cat).length) {
+          el.innerHTML = '<span class="ok">Tiles available:</span> ' +
+            Object.keys(cat).map(k => '<code style="display:inline;padding:0.15em 0.4em">' + k + '</code>').join(' ');
+          el.insertAdjacentHTML('afterend',
+            '<p>Interactive MapLibre UI loads when a style is configured for these sources. Catalog endpoint is working.</p>');
+        } else {
+          el.textContent = "No map tiles found yet — that is normal on a fresh install.";
+        }
+      })
+      .catch(() => {
+        document.getElementById("status").textContent =
+          "Tile server not reachable yet. If you just installed Maps, wait a few seconds and reload.";
+      });
+  </script>
+</body>
+</html>
