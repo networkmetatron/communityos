@@ -2,58 +2,136 @@
 
 **Version 1.1.0**
 
-> Take a clean Debian installation and turn it into a private, self-hosted community server with one command.
+> **CommunityOS is a local-first platform for running a digital community.**
+>
+> Install it on a clean Debian 13 server and get a website, chat, AI assistant, automatic HTTPS, and optional community apps with a single installation.
 
-## Install
+---
+
+## Features
+
+### Core
+
+- 🌐 Website (WordPress)
+- 💬 Chat (Matrix + Element)
+- 🤖 AI Assistant (Open WebUI)
+- 🔒 Automatic HTTPS (Caddy)
+- 🌐 Optional LAN DNS (`*.home.arpa`)
+
+### Optional apps
+
+- 📚 Library (Kiwix)
+- 🗺 Maps (Martin + MapLibre)
+- 🎬 Media (Jellyfin)
+- 📁 Files (Nextcloud)
+- 📺 Streaming (PeerTube)
+
+Everything lives under `/opt/communityos`.
+
+Docker is an implementation detail.
+
+Container images are pinned for reproducible installations.
+
+---
+
+# Installation
 
 1. Install Debian 13.
-2. On the server:
+
+2. Copy the CommunityOS release onto the server.
+
+3. Run:
 
 ```bash
 sudo ./install.sh
 ```
 
-3. Answer a few questions.
-4. DNS option during install:
-   - **Y** — CommunityOS provides LAN DNS (`*.home.arpa`); set router DHCP DNS to this server.
-   - **n** — You manage DNS yourself (Pi-hole, router, `/etc/hosts`, etc.).
-5. **Reconnect clients** (Wi‑Fi off/on, Ethernet replug, or renew DHCP lease) so they pick up the new DNS.
-6. Open **http://community.home.arpa**, install the **CommunityOS certificate once** (covers all services), then use HTTPS.
+4. Answer a few installation questions.
 
-If `community.home.arpa` does not resolve:
+5. DNS during installation:
 
-- Disconnect and reconnect Wi‑Fi  
-- **OR** unplug/reconnect Ethernet  
-- **OR** renew the DHCP lease  
+- **Y** — CommunityOS provides LAN DNS (`*.home.arpa`).
+  Configure your router's DHCP DNS server to point to CommunityOS.
+
+- **n** — Use your existing DNS solution
+  (router, Pi-hole, `/etc/hosts`, etc.)
+
+6. Reconnect client devices:
+
+- Disconnect/reconnect Wi-Fi
+- OR unplug/reconnect Ethernet
+- OR renew the DHCP lease
 
 The device may still be using its previous DNS configuration.
 
-## Certificate
+7. Visit:
 
-CommunityOS uses one local CA for every hostname. Install `http://community.home.arpa/ca.crt` once on each device. After that, Website, Chat, Assistant, and optional apps should not show browser trust warnings.
+```
+http://community.home.arpa
+```
 
-## Optional apps
+Install the CommunityOS certificate once.
+
+Then use HTTPS for all services.
+
+---
+
+# Certificate
+
+CommunityOS uses a single local Certificate Authority.
+
+Download:
+
+```
+http://community.home.arpa/ca.crt
+```
+
+Install it once on every device.
+
+The same CA secures:
+
+- Website
+- Chat
+- Assistant
+- Every installed optional app
+
+---
+
+# Optional Apps
+
+List installed apps:
 
 ```bash
 communityos apps
-sudo communityos app install kiwix      # Library
-sudo communityos app install maps       # Maps
-sudo communityos app install jellyfin   # Media
-sudo communityos app install nextcloud  # Files
-sudo communityos app install peertube   # Streaming
 ```
 
-Installing an app updates DNS (when CommunityOS DNS is enabled) and reloads Caddy so certificates stay consistent. The same CommunityOS CA is used.
+Install:
+
+```bash
+sudo communityos app install kiwix
+sudo communityos app install maps
+sudo communityos app install jellyfin
+sudo communityos app install nextcloud
+sudo communityos app install peertube
+```
+
+Installing an app automatically:
+
+- updates DNS (when CommunityOS DNS is enabled)
+- reloads Caddy
+- refreshes HTTPS certificates
 
 | App | URL |
-|-----|-----|
-| Library (Kiwix) | https://library.community.home.arpa |
+|------|-----|
+| Library | https://library.community.home.arpa |
 | Maps | https://maps.community.home.arpa |
-| Media (Jellyfin) | https://media.community.home.arpa |
-| Files (Nextcloud) | https://files.community.home.arpa |
-| Streaming (PeerTube) | https://stream.community.home.arpa |
+| Media | https://media.community.home.arpa |
+| Files | https://files.community.home.arpa |
+| Streaming | https://stream.community.home.arpa |
 
-## Everyday commands
+---
+
+# Everyday Commands
 
 ```bash
 communityos info
@@ -67,46 +145,94 @@ communityos stop
 communityos uninstall
 ```
 
-## Services
+---
+
+# Core Services
 
 | Address | Purpose |
-|---------|---------|
-| community.home.arpa | Website |
-| chat.community.home.arpa | Chat |
-| ai.community.home.arpa | Assistant |
+|----------|---------|
+| https://community.home.arpa | Website |
+| https://chat.community.home.arpa | Chat |
+| https://ai.community.home.arpa | Assistant |
 
-Everything lives under `/opt/communityos`. Docker is an implementation detail. Images are pinned for reproducibility.
+---
 
-See [PRINCIPLES.md](PRINCIPLES.md).
+# Local-First
 
-## Offline / local-first check
+CommunityOS is designed to continue working even when the Internet is unavailable.
 
-With the router WAN disconnected (or WAN cable unplugged), verify local services still load:
+With the WAN disconnected, verify that:
 
-- Website, Chat, Assistant  
-- Any installed optional apps (Library, Maps, Media, Files, Streaming)
+- Website works
+- Chat works
+- Assistant works
+- Installed optional apps work
 
-**Expected to fail offline:** Docker image pulls, internet-backed AI models, Matrix federation to the public network, external package updates.
+Expected to continue working:
 
-**Expected to keep working:** LAN DNS (if enabled), HTTPS with the CommunityOS CA, local content and chat between devices on the LAN.
+- LAN DNS (when enabled)
+- HTTPS using the CommunityOS CA
+- Local chat
+- Local content
+- Local media
+- Local files
 
-## Release validation (maintainers)
+Expected to fail:
+
+- Docker image downloads
+- Internet-backed AI
+- Matrix federation
+- Package updates
+
+---
+
+# Release Validation
 
 Before tagging a release:
 
-- [ ] Fresh Debian 13 install  
-- [ ] DNS enabled (Y) and DNS disabled (n)  
-- [ ] Android + Windows clients; Firefox + Chrome  
-- [ ] Certificate install from welcome page  
-- [ ] Client reconnect / DHCP renewal guidance verified  
-- [ ] WAN disconnected: core services still reachable on LAN  
-- [ ] Optional app install/remove; Caddy reload; same CA trusted  
-- [ ] `communityos doctor` healthy; no stale `/etc/hosts` surprises  
+- [ ] Fresh Debian 13 install
+- [ ] DNS enabled (Y)
+- [ ] DNS disabled (n)
+- [ ] Android
+- [ ] Windows
+- [ ] Firefox
+- [ ] Chrome
+- [ ] Certificate installation
+- [ ] DHCP renewal guidance verified
+- [ ] WAN disconnected
+- [ ] Optional app install/remove
+- [ ] `communityos doctor` healthy
 
-## Future install path
+---
+
+# Principles
+
+See:
+
+```
+PRINCIPLES.md
+```
+
+---
+
+# License
+
+CommunityOS is free software licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+See the `LICENSE` file for the complete license text.
+
+---
+
+# Future
+
+Eventually CommunityOS will support one-command installation:
 
 ```bash
 curl -fsSL https://communityos.org/install | sudo bash
 ```
 
-Until then, copy the release onto the server and run `sudo ./install.sh`.
+Until then, copy the release onto the server and run:
+
+```bash
+sudo ./install.sh
+```
