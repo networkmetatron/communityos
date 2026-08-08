@@ -1,0 +1,10 @@
+# CommunityOS optional app: Martin (tiles) + static MapLibre UI (Caddy)
+services:
+  martin:
+    image: ghcr.io/maplibre/martin:v0.14.2
+    container_name: communityos-martin
+    restart: unless-stopped
+    volumes:
+      - ./data/maps:/data:ro
+    # Serves all MBTiles/PMTiles found under /data
+    command: ["/data"]

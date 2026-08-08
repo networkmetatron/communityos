@@ -1,0 +1,7 @@
+dist/
+*.zip
+.env
+runtime/dnsmasq.conf
+runtime/apps/
+backups/*
+!backups/.gitkeep
